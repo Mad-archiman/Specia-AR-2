@@ -45,12 +45,27 @@ function ARViewerPageContent() {
         const url = URL.createObjectURL(blob);
         blobUrlRef.current = url;
         setModelUrl(url);
+        let geo: { lat: number; lon: number; alt: number } | null = null;
         if (metaRes.ok) {
           const meta = await metaRes.json();
-          if (!cancelled && meta.lat != null && meta.lon != null) {
-            setModelGeoLocation({ lat: meta.lat, lon: meta.lon, alt: meta.alt ?? 0 });
-          } else if (!cancelled) setModelGeoLocation(null);
-        } else if (!cancelled) setModelGeoLocation(null);
+          if (meta.lat != null && meta.lon != null) {
+            geo = { lat: meta.lat, lon: meta.lon, alt: meta.alt ?? 0 };
+          }
+        }
+        if (!cancelled) {
+          const qr = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('qrScannedCoords') : null;
+          if (qr) {
+            try {
+              const parsed = JSON.parse(qr) as { lat?: number; lon?: number; alt?: number };
+              if (typeof parsed.lat === 'number' && typeof parsed.lon === 'number') {
+                geo = { lat: parsed.lat, lon: parsed.lon, alt: typeof parsed.alt === 'number' ? parsed.alt : 0 };
+              }
+            } catch {
+              // ignore
+            }
+          }
+          setModelGeoLocation(geo);
+        }
         if (!cancelled) setModelReady(true);
       } catch {
         if (!cancelled) setLoadError('모델을 불러올 수 없습니다.');

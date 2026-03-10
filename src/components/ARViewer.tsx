@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -68,6 +69,11 @@ function isIOS(): boolean {
   return /iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
+function isMobile(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+}
+
 export interface ARViewerProps {
   className?: string;
   meshItems: MeshItem[];
@@ -82,6 +88,7 @@ export interface ARViewerProps {
 }
 
 export function ARViewer({ className = '', meshItems, setMeshItems, setModelSize, initialModelUrl, modelGeoLocation, arCode }: ARViewerProps) {
+  const router = useRouter();
   const containerRef = useRef<HTMLDivElement>(null);
   const arButtonContainerRef = useRef<HTMLDivElement>(null);
   const contextRef = useRef<ReturnType<typeof createThreeScene> | null>(null);
@@ -366,6 +373,15 @@ export function ARViewer({ className = '', meshItems, setMeshItems, setModelSize
       const reticle = reticleRef.current;
       const arModel = arPlaceableRef.current;
       if (!ctx || !reticle || !reticle.visible || !arModel) return;
+      for (const old of tapPlacedRef.current) {
+        ctx.scene.remove(old);
+      }
+      tapPlacedRef.current = [];
+      const loadedModel = loadedSceneRef.current;
+      if (loadedModel) {
+        loadedModel.visible = false;
+        ctx.scene.remove(loadedModel);
+      }
       const placed = arModel.clone();
       placed.matrix.copy(reticle.matrix);
       placed.matrix.decompose(placed.position, placed.quaternion, placed.scale);
@@ -564,208 +580,16 @@ export function ARViewer({ className = '', meshItems, setMeshItems, setModelSize
     contextRef.current?.renderer?.xr?.getSession()?.end();
     setLocationModeActive(false);
     locationModeActiveRef.current = false;
+    const ctx = contextRef.current;
     const loadedModel = loadedSceneRef.current;
-    if (loadedModel) loadedModel.visible = true;
+    if (loadedModel && ctx) {
+      if (!loadedModel.parent) ctx.scene.add(loadedModel);
+      loadedModel.visible = true;
+    }
   };
 
-  const handleLocationOn = useCallback(() => {
-    const geo = modelGeoLocationRef.current;
-    if (!geo) {
-      setLocationOnError('이 모델에는 위치 정보가 없습니다. 관리자에서 위경도를 설정해 주세요.');
-      return;
-    }
-    if (!navigator.geolocation) {
-      setLocationOnError('이 브라우저는 위치 서비스를 지원하지 않습니다.');
-      return;
-    }
-    setLocationOnError(null);
-    setLocationOnInfo(null);
-    setLocationOffsetPanelExpanded(true);
-    locationModeActiveRef.current = true;
-    setLocationModeActive(true);
-
-    const ctx = contextRef.current;
-    if (ctx) {
-      tapPlacedRef.current.forEach((obj) => ctx.scene.remove(obj));
-      tapPlacedRef.current = [];
-      const geoObj = geoPlacedRef.current;
-      if (geoObj) ctx.scene.remove(geoObj);
-      geoPlacedRef.current = null;
-      const marker = geoMarkerRef.current;
-      if (marker) {
-        ctx.scene.remove(marker);
-        (marker.geometry as THREE.BufferGeometry).dispose();
-        (marker.material as THREE.Material).dispose();
-        geoMarkerRef.current = null;
-      }
-    }
-
-    const getDeviceHeading = async (): Promise<number | null> => {
-      if (typeof window === 'undefined' || !('DeviceOrientationEvent' in window)) return null;
-      const DevOrient = window.DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> };
-      if (typeof DevOrient?.requestPermission === 'function') {
-        try {
-          const perm = await DevOrient.requestPermission();
-          if (perm !== 'granted') return null;
-        } catch {
-          return null;
-        }
-      }
-      return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          window.removeEventListener('deviceorientation', handler);
-          resolve(null);
-        }, 1200);
-        const handler = (e: DeviceOrientationEvent) => {
-          const ev = e as DeviceOrientationEvent & { webkitCompassHeading?: number };
-          const heading = ev.webkitCompassHeading ?? ev.alpha;
-          if (typeof heading === 'number' && !Number.isNaN(heading)) {
-            clearTimeout(timeout);
-            window.removeEventListener('deviceorientation', handler);
-            resolve(heading);
-          }
-        };
-        window.addEventListener('deviceorientation', handler);
-      });
-    };
-
-    const ACCURACY_TARGET_M = 10;
-    const ACCURACY_ACCEPTABLE_M = 20;
-    const PLACEMENT_WAIT_MS = 12000;
-    const ACCURACY_IMPROVE_THRESHOLD_M = 3; // accuracy가 이만큼 개선될 때만 bestPosition 갱신
-    const POSITION_CHANGE_THRESHOLD_M = 0.5; // 이 거리 이상 이동 시 bestPosition 갱신 (변동 최소화)
-    const USER_GEO_UPDATE_MIN_MS = 4000; // setUserGeoLocation 최소 간격 (ms, 변동 최소화)
-    const SLIDING_WINDOW_SIZE = 15; // 슬라이딩 윈도우 샘플 수 (위치 변동 최소화)
-    const MIN_SAMPLES_FOR_PLACEMENT = 5; // 배치 전 최소 샘플 수 (초기 노이즈 방지)
-
-    placementSetupDoneRef.current = false;
-    bestPositionRef.current = null;
-    smoothedPositionRef.current = null;
-    positionWindowRef.current = [];
-    lastUserGeoUpdateRef.current = 0;
-    if (placementTimeoutRef.current) {
-      clearTimeout(placementTimeoutRef.current);
-      placementTimeoutRef.current = null;
-    }
-
-    const runPlacement = async (userLat: number, userLon: number, userAlt: number) => {
-      if (placementSetupDoneRef.current) return;
-      placementSetupDoneRef.current = true;
-      if (placementTimeoutRef.current) {
-        clearTimeout(placementTimeoutRef.current);
-        placementTimeoutRef.current = null;
-      }
-      const off = targetOffsetRef.current;
-      const targetLat = geo.lat + off.lat;
-      const targetLon = geo.lon + off.lon;
-      const targetAlt = (geo.alt ?? 0) + off.alt;
-      const infos: string[] = [];
-      if (userAlt === 0) {
-        infos.push('고도 정보가 제공되지 않아 수평 위치만 표시됩니다.');
-      }
-      const horizontalDistRaw = getDistanceMeters(userLat, userLon, targetLat, targetLon);
-      const horizontalDist = Math.min(horizontalDistRaw, 150);
-      if (horizontalDistRaw > 150) {
-        infos.push('목표가 150m 이상 떨어져 있어 가깝게 표시됩니다.');
-      }
-      const bearing = getBearing(userLat, userLon, targetLat, targetLon);
-      const deltaAlt = userAlt - targetAlt;
-
-      const deviceHeading = await getDeviceHeading();
-      lastPlacementDeviceHeadingRef.current = deviceHeading;
-      if (deviceHeading == null) {
-        infos.push('나침반 정보를 사용할 수 없어 휴대폰이 바라보는 방향으로 배치됩니다.');
-      }
-      setLocationOnInfo(infos.length > 0 ? infos.join(' ') : null);
-
-      geoPlacementPendingRef.current = {
-        horizontalDist,
-        deltaAlt,
-        bearing,
-        deviceHeading,
-        retryCount: 0,
-      };
-    };
-
-    const watchId = navigator.geolocation.watchPosition(
-      async (pos) => {
-        const userLat = pos.coords.latitude;
-        const userLon = pos.coords.longitude;
-        const userAlt = pos.coords.altitude ?? 0;
-        const accuracy = pos.coords.accuracy ?? 999;
-
-        // 1. 슬라이딩 윈도우 평균 (위치 변동 최소화)
-        const window = positionWindowRef.current;
-        window.push({ lat: userLat, lon: userLon, alt: userAlt });
-        if (window.length > SLIDING_WINDOW_SIZE) {
-          window.shift();
-        }
-        const n = window.length;
-        const smoothed = {
-          lat: window.reduce((s, p) => s + p.lat, 0) / n,
-          lon: window.reduce((s, p) => s + p.lon, 0) / n,
-          alt: window.reduce((s, p) => s + p.alt, 0) / n,
-        };
-        smoothedPositionRef.current = smoothed;
-
-        // 2. bestPositionRef 갱신 조건 강화: accuracy 3m 이상 개선 또는 2m 이상 이동
-        const prev = bestPositionRef.current;
-        const shouldUpdateBest =
-          !prev ||
-          prev.accuracy - accuracy >= ACCURACY_IMPROVE_THRESHOLD_M ||
-          (prev.accuracy <= ACCURACY_ACCEPTABLE_M &&
-            getDistanceMeters(prev.lat, prev.lon, smoothed.lat, smoothed.lon) >= POSITION_CHANGE_THRESHOLD_M);
-        if (shouldUpdateBest) {
-          bestPositionRef.current = {
-            lat: smoothed.lat,
-            lon: smoothed.lon,
-            alt: smoothed.alt,
-            accuracy,
-          };
-        }
-        const best = bestPositionRef.current;
-
-        // 3. setUserGeoLocation 호출 억제: 2.5초 간격
-        if (best && best.accuracy <= ACCURACY_ACCEPTABLE_M) {
-          const now = Date.now();
-          const lastUpdate = lastUserGeoUpdateRef.current;
-          const timeSinceUpdate = now - lastUpdate;
-          if (timeSinceUpdate >= USER_GEO_UPDATE_MIN_MS || lastUpdate === 0) {
-            lastUserGeoUpdateRef.current = now;
-            setUserGeoLocation({ lat: best.lat, lon: best.lon, alt: best.alt });
-          }
-        }
-
-        if (!placementSetupDoneRef.current && best && n >= MIN_SAMPLES_FOR_PLACEMENT) {
-          if (accuracy <= ACCURACY_TARGET_M) {
-            await runPlacement(smoothed.lat, smoothed.lon, smoothed.alt);
-          } else if (best.accuracy <= ACCURACY_ACCEPTABLE_M) {
-            await runPlacement(best.lat, best.lon, best.alt);
-          }
-        }
-      },
-      (err) => {
-        setLocationOnError(err.message || '위치를 가져올 수 없습니다.');
-        setLocationModeActive(false);
-        locationModeActiveRef.current = false;
-        if (geolocationWatchIdRef.current != null) {
-          navigator.geolocation.clearWatch(geolocationWatchIdRef.current);
-          geolocationWatchIdRef.current = null;
-        }
-      },
-      { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 }
-    );
-    geolocationWatchIdRef.current = watchId;
-
-    placementTimeoutRef.current = setTimeout(() => {
-      placementTimeoutRef.current = null;
-      if (!placementSetupDoneRef.current && bestPositionRef.current) {
-        const b = bestPositionRef.current;
-        setUserGeoLocation({ lat: b.lat, lon: b.lon, alt: b.alt });
-        runPlacement(b.lat, b.lon, b.alt);
-      }
-    }, PLACEMENT_WAIT_MS);
-  }, []);
+  const initialModelUrlRef = useRef(initialModelUrl);
+  initialModelUrlRef.current = initialModelUrl;
 
   const STEP_LAT_LON = 0.000001; // 위·경도 1클릭 = 0.000001°
   const SLIDER_ALT_STEP = 0.001; // 고도 슬라이더 1틱 = 1mm
@@ -889,6 +713,47 @@ export function ARViewer({ className = '', meshItems, setMeshItems, setModelSize
     );
   }, [applyOffsetAndReplace]);
 
+  const handleLocationOn = useCallback(() => {
+    const url = initialModelUrlRef.current;
+    const code = arCodeRef.current;
+    const geo = modelGeoLocationRef.current;
+    if (!url) {
+      setLocationOnError('모델을 먼저 불러와 주세요.');
+      return;
+    }
+    setLocationOnError(null);
+    setLocationOnInfo(null);
+
+    if (geo) {
+      locationModeActiveRef.current = true;
+      setLocationModeActive(true);
+      handleLocationRefresh();
+      return;
+    }
+
+    // 마커 모드는 카메라 필요 → HTTPS 필수
+    if (typeof window !== 'undefined' && !window.isSecureContext) {
+      setLocationOnError(
+        '마커 카메라를 사용하려면 HTTPS가 필요합니다. http:// 대신 https:// 로 접속하세요.'
+      );
+      return;
+    }
+
+    const session = contextRef.current?.renderer?.xr?.getSession();
+    if (session) session.end();
+    setLocationModeActive(false);
+    locationModeActiveRef.current = false;
+    // WebXR/WebGL 정리 후 리다이렉트 (탭 크래시 방지)
+    // geo 없을 때: 모바일 → QR 스캔 화면, PC → AR.js 마커 화면
+    setTimeout(() => {
+      if (isMobile()) {
+        router.push(code ? `/ar/marker?code=${code}&mode=qr` : '/ar/marker?mode=qr');
+      } else {
+        router.push(code ? `/ar/marker?code=${code}` : '/ar/marker');
+      }
+    }, 400);
+  }, [router, handleLocationRefresh]);
+
   const makeOffsetButtonHandlers = useCallback(
     (dLat: number, dLon: number, dAlt: number) => ({
       onPointerDown: (e: React.PointerEvent) => {
@@ -968,27 +833,16 @@ export function ARViewer({ className = '', meshItems, setMeshItems, setModelSize
         aria-hidden
       >
         <div className="pointer-events-auto absolute left-5 top-5 z-10 flex flex-col gap-1">
-          {locationModeActive ? (
-            <button
-              type="button"
-              onClick={handleLocationOff}
-              className="rounded border border-white/80 bg-black/50 px-4 py-2 text-sm text-white opacity-90 outline-none transition-opacity hover:opacity-100"
-              aria-label="Location OFF"
-            >
-              Location OFF
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleLocationOn}
-              disabled={!modelGeoLocation}
-              className="rounded border border-white/80 bg-black/50 px-4 py-2 text-sm text-white opacity-90 outline-none transition-opacity hover:opacity-100 disabled:opacity-50 disabled:cursor-not-allowed"
-              aria-label="Location ON"
-              title={modelGeoLocation ? '목표 위치를 바라본 상태에서 눌러 주세요' : '위치 정보가 설정되지 않은 모델입니다'}
-            >
-              Location ON
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={handleLocationOn}
+            disabled={!initialModelUrl}
+            className="rounded border border-white/80 bg-black/50 px-4 py-2 text-sm text-white opacity-90 outline-none transition-opacity hover:opacity-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-label="Location ON"
+            title={initialModelUrl ? '마커를 비춰 모델을 배치합니다' : '모델을 먼저 불러와 주세요'}
+          >
+            Location ON
+          </button>
           {locationOnError && (
             <p className="max-w-[200px] rounded bg-red-900/90 px-2 py-1 text-xs text-white">
               {locationOnError}

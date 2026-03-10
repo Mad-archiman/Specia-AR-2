@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Orbitron } from 'next/font/google';
 import { Navbar } from '@/components/Navbar';
+import 'tailwindcss/index.css';
 import './globals.css';
 
 const orbitron = Orbitron({
