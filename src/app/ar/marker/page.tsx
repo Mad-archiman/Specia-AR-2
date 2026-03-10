@@ -70,6 +70,8 @@ function ARMarkerPageContent() {
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.setItem('qrScannedCoords', JSON.stringify(coords));
     }
+    // QR 스캔 완료 시 AR 화면으로 자동 복귀
+    router.push(code ? `/ar?code=${code}` : '/ar');
   };
 
   // code 있고 mode !== 'qr' → AR.js 마커 트래킹 (모델 로드 후)
