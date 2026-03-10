@@ -39,10 +39,12 @@ function parseCoordsFromQR(text: string): ParsedCoords | null {
 export interface QRScanSessionProps {
   onClose: () => void;
   onScanSuccess?: (coords: ParsedCoords) => void;
+  /** QR 좌표를 모델 원점(0,0,0)으로 설정 시 호출. LOCATION SET 버튼 클릭 시 호출됨 */
+  onLocationSet?: (coords: ParsedCoords) => void;
 }
 
 /** QR 코드 스캔 - 좌표(JSON) 포함 시 성공 */
-export function QRScanSession({ onClose, onScanSuccess }: QRScanSessionProps) {
+export function QRScanSession({ onClose, onScanSuccess, onLocationSet }: QRScanSessionProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const startedRef = useRef(false);
@@ -151,6 +153,20 @@ export function QRScanSession({ onClose, onScanSuccess }: QRScanSessionProps) {
         )}
       </div>
       <div ref={containerRef} className="flex-1 min-h-0" />
+      {scanned && onLocationSet && (
+        <div className="absolute bottom-0 left-0 right-0 z-10 border-t border-white/20 bg-black/80 p-4 safe-area-inset-bottom">
+          <button
+            type="button"
+            onClick={() => onLocationSet(scanned)}
+            className="w-full rounded-lg border-2 border-emerald-500 bg-emerald-600/90 py-4 font-semibold text-white transition-colors hover:bg-emerald-500 active:bg-emerald-700"
+          >
+            LOCATION SET
+          </button>
+          <p className="mt-2 text-center text-xs text-white/70">
+            이 위치를 GLB 모델 원점(0,0,0)으로 설정합니다
+          </p>
+        </div>
+      )}
     </div>
   );
 }

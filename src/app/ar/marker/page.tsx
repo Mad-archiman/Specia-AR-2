@@ -66,11 +66,14 @@ function ARMarkerPageContent() {
     router.push(code ? `/ar?code=${code}` : '/ar');
   };
 
-  const handleScanSuccess = (coords: { lat: number; lon: number; alt?: number }) => {
+  const handleScanSuccess = (_coords: { lat: number; lon: number; alt?: number }) => {
+    // 스캔 성공 시 LOCATION SET 버튼 표시. 실제 저장/이동은 handleLocationSet에서 수행
+  };
+
+  const handleLocationSet = (coords: { lat: number; lon: number; alt?: number }) => {
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.setItem('qrScannedCoords', JSON.stringify(coords));
     }
-    // QR 스캔 완료 시 AR 화면으로 자동 복귀
     router.push(code ? `/ar?code=${code}` : '/ar');
   };
 
@@ -114,7 +117,13 @@ function ARMarkerPageContent() {
   }
 
   // QR 좌표 스캔 (mode=qr 또는 code 없음)
-  return <QRScanSession onClose={handleClose} onScanSuccess={handleScanSuccess} />;
+  return (
+    <QRScanSession
+      onClose={handleClose}
+      onScanSuccess={handleScanSuccess}
+      onLocationSet={handleLocationSet}
+    />
+  );
 }
 
 export default function ARMarkerPage() {
